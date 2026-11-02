@@ -5,6 +5,10 @@ import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import javax.imageio.ImageIO;
+import java.io.File;
+import java.io.IOException;
+
 
 public class ImageWindow extends JFrame {
 
@@ -108,6 +112,68 @@ public class ImageWindow extends JFrame {
         pack();
         setLocationRelativeTo(null);
     }
+    
+    
+    private void saveResult() {
+
+    statusLabel.setText("Processing completed. Saving result.jpg...");
+
+    SwingWorker<Boolean, Void> saveWorker =
+            new SwingWorker<>() {
+
+        @Override
+        protected Boolean doInBackground()
+                throws IOException {
+
+            File output = new File("result.jpg");
+
+            boolean saved = ImageIO.write(
+                    result, "jpg", output
+            );
+
+            if (!saved) {
+                throw new IOException(
+                        "No JPEG writer available."
+                );
+            }
+
+            return true;
+        }
+
+        @Override
+        protected void done() {
+            try {
+                get();
+
+                statusLabel.setText(String.format(
+                        "Completed | Mode: %s | Workers: %d | "
+                        + "Processing: %.2f ms | Saved: result.jpg",
+                        mode,
+                        workerCount,
+                        processingTime / 1_000_000.0
+                ));
+
+                setTitle("Image Pixelation - Completed");
+
+                System.out.println(
+                        "Result saved to: "
+                        + new File("result.jpg").getAbsolutePath()
+                );
+
+            } catch (Exception e) {
+                statusLabel.setText(
+                        "Error saving image: " + e.getMessage()
+                );
+
+                System.err.println(
+                        "Failed to save result.jpg: " + e.getMessage()
+                );
+            }
+        }
+    };
+
+    saveWorker.execute();
+}
 
     public void startProcessing() {
 
@@ -263,24 +329,26 @@ public class ImageWindow extends JFrame {
                 100.0 * displayedBlocks / totalBlocks;
 
         statusLabel.setText(String.format(
-                "Mode: %s | Workers: %d | Progress: %.1f%%",
-                mode, workerCount, progress
+                "Mode: %s | Workers: %d | "
+                + "Progress: %.1f%% (%d/%d blocks)",
+                mode,
+                workerCount,
+                progress,
+                displayedBlocks,
+                totalBlocks
         ));
 
-        if (processingFinished && completedBlocks.isEmpty()) {
+        
+        if (processingFinished
+                && completedBlocks.isEmpty()
+                && displayedBlocks == totalBlocks) {
 
             displayTimer.stop();
+
             imagePanel.repaint();
 
-            statusLabel.setText(String.format(
-                    "Completed | Mode: %s | Workers: %d | "
-                            + "Processing time: %.2f ms",
-                    mode,
-                    workerCount,
-                    processingTime / 1_000_000.0
-            ));
-
-            setTitle("Image Pixelation - Completed");
+            saveResult();
         }
+
     }
 }
