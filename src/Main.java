@@ -69,7 +69,7 @@ public class Main {
 
             SwingUtilities.invokeLater(() -> {
                 ImageWindow window = new ImageWindow(
-                        image, squareSize
+                        image, squareSize, mode
                 );
                 window.setVisible(true);
                 window.startProcessing();

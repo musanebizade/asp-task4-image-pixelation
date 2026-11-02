@@ -2,7 +2,9 @@
 import javax.swing.*;
 import java.awt.*;
 import java.awt.image.BufferedImage;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.*;
 
 public class ImageWindow extends JFrame {
 
@@ -12,25 +14,32 @@ public class ImageWindow extends JFrame {
     private final JLabel statusLabel;
 
     private final int squareSize;
+    private final ProcessingMode mode;
 
     private final ConcurrentLinkedQueue<Block> completedBlocks =
             new ConcurrentLinkedQueue<>();
 
-    private long totalBlocks;
+    private final long totalBlocks;
+    private final int workerCount;
+
     private long displayedBlocks = 0;
-    private volatile long processingTime = 0;
-    private volatile boolean processingFinished = false;
+    private long processingTime = 0;
+    private boolean processingFinished = false;
 
     private Timer displayTimer;
 
-    // Represents one processed image block.
+    // Stores the information required to display one block.
     private record Block(
             int x, int y, int width, int height, int color) {}
 
-    public ImageWindow(BufferedImage image, int squareSize) {
+    public ImageWindow(
+            BufferedImage image,
+            int squareSize,
+            ProcessingMode mode) {
 
         this.original = image;
         this.squareSize = squareSize;
+        this.mode = mode;
 
         int width = image.getWidth();
         int height = image.getHeight();
@@ -44,9 +53,18 @@ public class ImageWindow extends JFrame {
 
         long columns = ((long) width - 1) / squareSize + 1;
         long rows = ((long) height - 1) / squareSize + 1;
+
         totalBlocks = columns * rows;
 
-        setTitle("Image Pixelation - Single Threaded");
+        int availableCores =
+                Runtime.getRuntime().availableProcessors();
+
+        workerCount = mode == ProcessingMode.S
+                ? 1
+                : (int) Math.min(
+                        Math.max(1, availableCores), rows);
+
+        setTitle("Image Pixelation - " + mode);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
 
@@ -93,55 +111,42 @@ public class ImageWindow extends JFrame {
 
     public void startProcessing() {
 
-        // Display approximately 30 frames per second.
         displayTimer = new Timer(33, e -> updateDisplay());
         displayTimer.start();
 
-        SwingWorker<Void, Void> worker = new SwingWorker<>() {
+        SwingWorker<Long, Void> worker = new SwingWorker<>() {
 
             @Override
-            protected Void doInBackground() {
+            protected Long doInBackground() throws Exception {
 
                 long start = System.nanoTime();
 
-                int width = original.getWidth();
-                int height = original.getHeight();
-
-                // Process blocks from left to right,
-                // and from top to bottom.
-                for (long y = 0; y < height; y += squareSize) {
-                    for (long x = 0; x < width; x += squareSize) {
-
-                        int startX = (int) x;
-                        int startY = (int) y;
-
-                        int blockWidth = (int) Math.min(
-                                (long) squareSize, width - x);
-
-                        int blockHeight = (int) Math.min(
-                                (long) squareSize, height - y);
-
-                        int color = ImageProcessor.averageColor(
-                                original, startX, startY, squareSize);
-
-                        completedBlocks.add(new Block(
-                                startX, startY,
-                                blockWidth, blockHeight, color));
-                    }
+                if (mode == ProcessingMode.S) {
+                    processRegion(
+                            0,
+                            ((long) original.getHeight() - 1)
+                                    / squareSize + 1
+                    );
+                } else {
+                    processParallel();
                 }
 
-                processingTime = System.nanoTime() - start;
-                processingFinished = true;
-
-                return null;
+                return System.nanoTime() - start;
             }
 
             @Override
             protected void done() {
-                // The timer will finish displaying queued blocks.
-                if (isCancelled()) {
-                    statusLabel.setText("Processing cancelled");
+                try {
+                    processingTime = get();
+                    processingFinished = true;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     displayTimer.stop();
+                    statusLabel.setText("Processing interrupted");
+                } catch (ExecutionException | CancellationException e) {
+                    displayTimer.stop();
+                    statusLabel.setText(
+                            "Processing failed: " + e.getMessage());
                 }
             }
         };
@@ -149,12 +154,83 @@ public class ImageWindow extends JFrame {
         worker.execute();
     }
 
+    // Processes a consecutive range of block rows.
+    private void processRegion(long startRow, long endRow) {
+
+        int width = original.getWidth();
+        int height = original.getHeight();
+
+        for (long row = startRow; row < endRow; row++) {
+
+            long y = row * squareSize;
+            int startY = (int) y;
+
+            for (long x = 0; x < width; x += squareSize) {
+
+                int startX = (int) x;
+
+                int blockWidth = (int) Math.min(
+                        (long) squareSize, width - x);
+
+                int blockHeight = (int) Math.min(
+                        (long) squareSize, height - y);
+
+                int color = ImageProcessor.averageColor(
+                        original, startX, startY, squareSize);
+
+                completedBlocks.add(new Block(
+                        startX,
+                        startY,
+                        blockWidth,
+                        blockHeight,
+                        color
+                ));
+            }
+        }
+    }
+
+    // Divides the block rows among multiple workers.
+    private void processParallel()
+            throws InterruptedException, ExecutionException {
+
+        long totalRows =
+                ((long) original.getHeight() - 1)
+                        / squareSize + 1;
+
+        ExecutorService executor =
+                Executors.newFixedThreadPool(workerCount);
+
+        List<Future<?>> tasks = new ArrayList<>();
+
+        try {
+            for (int i = 0; i < workerCount; i++) {
+
+                long startRow =
+                        totalRows * i / workerCount;
+
+                long endRow =
+                        totalRows * (i + 1) / workerCount;
+
+                tasks.add(executor.submit(() ->
+                        processRegion(startRow, endRow)
+                ));
+            }
+
+            // Wait until all processing workers finish.
+            for (Future<?> task : tasks) {
+                task.get();
+            }
+
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    // Runs on Swing's Event Dispatch Thread.
     private void updateDisplay() {
 
-        // Display a limited number of blocks per frame.
-        // This makes progress visible without slowing computation.
         long blocksPerFrame = Math.max(
-                1, (totalBlocks + 149) / 150);
+                1, totalBlocks / 150);
 
         Graphics2D graphics = result.createGraphics();
 
@@ -187,8 +263,8 @@ public class ImageWindow extends JFrame {
                 100.0 * displayedBlocks / totalBlocks;
 
         statusLabel.setText(String.format(
-                "Progress: %.1f%% (%d/%d blocks)",
-                progress, displayedBlocks, totalBlocks
+                "Mode: %s | Workers: %d | Progress: %.1f%%",
+                mode, workerCount, progress
         ));
 
         if (processingFinished && completedBlocks.isEmpty()) {
@@ -197,7 +273,10 @@ public class ImageWindow extends JFrame {
             imagePanel.repaint();
 
             statusLabel.setText(String.format(
-                    "Completed | Processing time: %.2f ms",
+                    "Completed | Mode: %s | Workers: %d | "
+                            + "Processing time: %.2f ms",
+                    mode,
+                    workerCount,
                     processingTime / 1_000_000.0
             ));
 
