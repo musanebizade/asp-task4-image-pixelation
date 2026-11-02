@@ -26,6 +26,7 @@ public class ImageProcessor {
 
         for (int y = startY; y < endY; y++) {
             for (int x = startX; x < endX; x++) {
+
                 int rgb = image.getRGB(x, y);
 
                 red += (rgb >> 16) & 0xFF;
@@ -47,31 +48,34 @@ public class ImageProcessor {
             BufferedImage original,
             int squareSize) {
 
+        if (original == null || squareSize <= 0) {
+            throw new IllegalArgumentException(
+                    "Invalid image or square size");
+        }
+
         int width = original.getWidth();
         int height = original.getHeight();
 
         BufferedImage result = new BufferedImage(
-                width,
-                height,
-                BufferedImage.TYPE_INT_RGB
-        );
+                width, height, BufferedImage.TYPE_INT_RGB);
 
-        for (int y = 0; y < height; y += squareSize) {
-            for (int x = 0; x < width; x += squareSize) {
+        for (long y = 0; y < height; y += squareSize) {
+            for (long x = 0; x < width; x += squareSize) {
+
+                int startX = (int) x;
+                int startY = (int) y;
 
                 int color = averageColor(
-                        original, x, y, squareSize
-                );
+                        original, startX, startY, squareSize);
 
                 int endX = (int) Math.min(
-                        (long) x + squareSize, width
-                );
-                int endY = (int) Math.min(
-                        (long) y + squareSize, height
-                );
+                        x + squareSize, width);
 
-                for (int py = y; py < endY; py++) {
-                    for (int px = x; px < endX; px++) {
+                int endY = (int) Math.min(
+                        y + squareSize, height);
+
+                for (int py = startY; py < endY; py++) {
+                    for (int px = startX; px < endX; px++) {
                         result.setRGB(px, py, color);
                     }
                 }

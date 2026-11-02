@@ -1,16 +1,17 @@
 
 import javax.swing.*;
+import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.image.BufferedImage;
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
-import javax.imageio.ImageIO;
-import java.io.File;
-import java.io.IOException;
-
 
 public class ImageWindow extends JFrame {
+
+    private static final int QUEUE_CAPACITY = 4096;
 
     private final BufferedImage original;
     private final BufferedImage result;
@@ -19,20 +20,19 @@ public class ImageWindow extends JFrame {
 
     private final int squareSize;
     private final ProcessingMode mode;
-
-    private final ConcurrentLinkedQueue<Block> completedBlocks =
-            new ConcurrentLinkedQueue<>();
-
-    private final long totalBlocks;
     private final int workerCount;
+    private final long totalBlocks;
+
+    private final BlockingQueue<Block> completedBlocks =
+            new ArrayBlockingQueue<>(QUEUE_CAPACITY);
 
     private long displayedBlocks = 0;
-    private long processingTime = 0;
     private boolean processingFinished = false;
+    private long processingTime = 0;
+    private boolean saveStarted = false;
 
     private Timer displayTimer;
 
-    // Stores the information required to display one block.
     private record Block(
             int x, int y, int width, int height, int color) {}
 
@@ -40,6 +40,11 @@ public class ImageWindow extends JFrame {
             BufferedImage image,
             int squareSize,
             ProcessingMode mode) {
+
+        if (squareSize <= 0) {
+            throw new IllegalArgumentException(
+                    "Square size must be positive");
+        }
 
         this.original = image;
         this.squareSize = squareSize;
@@ -57,16 +62,13 @@ public class ImageWindow extends JFrame {
 
         long columns = ((long) width - 1) / squareSize + 1;
         long rows = ((long) height - 1) / squareSize + 1;
-
         totalBlocks = columns * rows;
 
-        int availableCores =
-                Runtime.getRuntime().availableProcessors();
+        int cores = Runtime.getRuntime().availableProcessors();
 
         workerCount = mode == ProcessingMode.S
                 ? 1
-                : (int) Math.min(
-                        Math.max(1, availableCores), rows);
+                : (int) Math.min(Math.max(1, cores), rows);
 
         setTitle("Image Pixelation - " + mode);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -112,68 +114,6 @@ public class ImageWindow extends JFrame {
         pack();
         setLocationRelativeTo(null);
     }
-    
-    
-    private void saveResult() {
-
-    statusLabel.setText("Processing completed. Saving result.jpg...");
-
-    SwingWorker<Boolean, Void> saveWorker =
-            new SwingWorker<>() {
-
-        @Override
-        protected Boolean doInBackground()
-                throws IOException {
-
-            File output = new File("result.jpg");
-
-            boolean saved = ImageIO.write(
-                    result, "jpg", output
-            );
-
-            if (!saved) {
-                throw new IOException(
-                        "No JPEG writer available."
-                );
-            }
-
-            return true;
-        }
-
-        @Override
-        protected void done() {
-            try {
-                get();
-
-                statusLabel.setText(String.format(
-                        "Completed | Mode: %s | Workers: %d | "
-                        + "Processing: %.2f ms | Saved: result.jpg",
-                        mode,
-                        workerCount,
-                        processingTime / 1_000_000.0
-                ));
-
-                setTitle("Image Pixelation - Completed");
-
-                System.out.println(
-                        "Result saved to: "
-                        + new File("result.jpg").getAbsolutePath()
-                );
-
-            } catch (Exception e) {
-                statusLabel.setText(
-                        "Error saving image: " + e.getMessage()
-                );
-
-                System.err.println(
-                        "Failed to save result.jpg: " + e.getMessage()
-                );
-            }
-        }
-    };
-
-    saveWorker.execute();
-}
 
     public void startProcessing() {
 
@@ -187,14 +127,14 @@ public class ImageWindow extends JFrame {
 
                 long start = System.nanoTime();
 
+                long totalRows =
+                        ((long) original.getHeight() - 1)
+                                / squareSize + 1;
+
                 if (mode == ProcessingMode.S) {
-                    processRegion(
-                            0,
-                            ((long) original.getHeight() - 1)
-                                    / squareSize + 1
-                    );
+                    processRegion(0, totalRows);
                 } else {
-                    processParallel();
+                    processParallel(totalRows);
                 }
 
                 return System.nanoTime() - start;
@@ -220,8 +160,8 @@ public class ImageWindow extends JFrame {
         worker.execute();
     }
 
-    // Processes a consecutive range of block rows.
-    private void processRegion(long startRow, long endRow) {
+    private void processRegion(long startRow, long endRow)
+            throws InterruptedException {
 
         int width = original.getWidth();
         int height = original.getHeight();
@@ -244,24 +184,17 @@ public class ImageWindow extends JFrame {
                 int color = ImageProcessor.averageColor(
                         original, startX, startY, squareSize);
 
-                completedBlocks.add(new Block(
-                        startX,
-                        startY,
-                        blockWidth,
-                        blockHeight,
-                        color
+                // Wait when the bounded queue is full.
+                completedBlocks.put(new Block(
+                        startX, startY,
+                        blockWidth, blockHeight, color
                 ));
             }
         }
     }
 
-    // Divides the block rows among multiple workers.
-    private void processParallel()
+    private void processParallel(long totalRows)
             throws InterruptedException, ExecutionException {
-
-        long totalRows =
-                ((long) original.getHeight() - 1)
-                        / squareSize + 1;
 
         ExecutorService executor =
                 Executors.newFixedThreadPool(workerCount);
@@ -277,12 +210,12 @@ public class ImageWindow extends JFrame {
                 long endRow =
                         totalRows * (i + 1) / workerCount;
 
-                tasks.add(executor.submit(() ->
-                        processRegion(startRow, endRow)
-                ));
+                tasks.add(executor.submit(() -> {
+                    processRegion(startRow, endRow);
+                    return null;
+                }));
             }
 
-            // Wait until all processing workers finish.
             for (Future<?> task : tasks) {
                 task.get();
             }
@@ -292,11 +225,10 @@ public class ImageWindow extends JFrame {
         }
     }
 
-    // Runs on Swing's Event Dispatch Thread.
     private void updateDisplay() {
 
         long blocksPerFrame = Math.max(
-                1, totalBlocks / 150);
+                1, (totalBlocks - 1) / 150 + 1);
 
         Graphics2D graphics = result.createGraphics();
 
@@ -307,12 +239,9 @@ public class ImageWindow extends JFrame {
                 && (block = completedBlocks.poll()) != null) {
 
             graphics.setColor(new Color(block.color()));
-
             graphics.fillRect(
-                    block.x(),
-                    block.y(),
-                    block.width(),
-                    block.height()
+                    block.x(), block.y(),
+                    block.width(), block.height()
             );
 
             displayedBlocks++;
@@ -330,25 +259,72 @@ public class ImageWindow extends JFrame {
 
         statusLabel.setText(String.format(
                 "Mode: %s | Workers: %d | "
-                + "Progress: %.1f%% (%d/%d blocks)",
-                mode,
-                workerCount,
-                progress,
-                displayedBlocks,
-                totalBlocks
+                        + "Progress: %.1f%% (%d/%d blocks)",
+                mode, workerCount, progress,
+                displayedBlocks, totalBlocks
         ));
 
-        
         if (processingFinished
                 && completedBlocks.isEmpty()
-                && displayedBlocks == totalBlocks) {
+                && displayedBlocks == totalBlocks
+                && !saveStarted) {
 
+            saveStarted = true;
             displayTimer.stop();
-
             imagePanel.repaint();
-
             saveResult();
         }
+    }
 
+    private void saveResult() {
+
+        statusLabel.setText("Saving result.jpg...");
+
+        SwingWorker<Void, Void> saveWorker = new SwingWorker<>() {
+
+            @Override
+            protected Void doInBackground() throws IOException {
+
+                boolean saved = ImageIO.write(
+                        result, "jpg", new File("result.jpg"));
+
+                if (!saved) {
+                    throw new IOException(
+                            "No JPEG writer available");
+                }
+
+                return null;
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    get();
+
+                    statusLabel.setText(String.format(
+                            "Completed | Mode: %s | Workers: %d | "
+                                    + "Time: %.2f ms | Saved: result.jpg",
+                            mode, workerCount,
+                            processingTime / 1_000_000.0
+                    ));
+
+                    setTitle("Image Pixelation - Completed");
+
+                    System.out.println(
+                            "Result saved to: "
+                                    + new File("result.jpg").getAbsolutePath()
+                    );
+
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    statusLabel.setText("Saving interrupted");
+                } catch (ExecutionException | CancellationException e) {
+                    statusLabel.setText(
+                            "Saving failed: " + e.getMessage());
+                }
+            }
+        };
+
+        saveWorker.execute();
     }
 }
