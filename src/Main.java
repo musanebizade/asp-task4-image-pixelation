@@ -67,14 +67,12 @@ public class Main {
             System.out.println("Square size: " + squareSize);
             System.out.println("Processing mode: " + mode);
 
-            BufferedImage result = ImageProcessor.processImage(
-                    image,
-                    squareSize
-            );
-
             SwingUtilities.invokeLater(() -> {
-                ImageWindow window = new ImageWindow(result);
+                ImageWindow window = new ImageWindow(
+                        image, squareSize
+                );
                 window.setVisible(true);
+                window.startProcessing();
             });
 
         } catch (IOException e) {
