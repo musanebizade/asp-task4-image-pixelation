@@ -67,8 +67,13 @@ public class Main {
             System.out.println("Square size: " + squareSize);
             System.out.println("Processing mode: " + mode);
 
+            BufferedImage result = ImageProcessor.processImage(
+                    image,
+                    squareSize
+            );
+
             SwingUtilities.invokeLater(() -> {
-                ImageWindow window = new ImageWindow(image);
+                ImageWindow window = new ImageWindow(result);
                 window.setVisible(true);
             });
 
